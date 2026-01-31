@@ -209,6 +209,8 @@ def get_device_type():
         return "cuda"
     elif hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu"
+    elif hasattr(torch, "npu") and torch.npu.is_available(): # Unsloth-PTO-VERIFY: check npu devices
+        return "npu"
     # Check torch.accelerator
     if hasattr(torch, "accelerator"):
         if not torch.accelerator.is_available():
@@ -239,11 +241,15 @@ def get_device_count():
         return torch.cuda.device_count()
     elif DEVICE_TYPE == "xpu":
         return torch.xpu.device_count()
+    elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+        return torch.npu.device_count()
     else:
         return 1
 pass
 
 DEVICE_COUNT : int = get_device_count()
+
+# Unsloth-PTO-TODO: Implement for NPU for BITSANDBYTES 
 
 # Check blocksize for 4bit -> 64 for CUDA, 128 for AMD
 # If AMD, we cannot load pre-quantized models for now :(

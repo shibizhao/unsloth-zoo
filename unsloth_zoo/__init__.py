@@ -16,6 +16,8 @@
 
 __version__ = "2026.4.3"
 
+# Unsloth-PTO-FIXME: set the environment variables for the *npu* device
+
 import os
 import warnings
 import re
@@ -256,6 +258,7 @@ if IS_HIP_RUNTIME:
         if "PYTORCH_HIP_ALLOC_CONF" not in os.environ and "PYTORCH_ALLOC_CONF" in os.environ:
             os.environ["PYTORCH_HIP_ALLOC_CONF"] = os.environ["PYTORCH_ALLOC_CONF"]
             delete_key("PYTORCH_ALLOC_CONF")
+<<<<<<< HEAD
         # expandable_segments is not supported on ROCm/HIP
         remove_expandable_segments("PYTORCH_HIP_ALLOC_CONF")
         remove_expandable_segments("PYTORCH_ALLOC_CONF")
@@ -263,6 +266,15 @@ if IS_HIP_RUNTIME:
 elif DEVICE_TYPE == "cuda" and not IS_HIP_RUNTIME and not IS_TORCH_2_9_OR_NEWER:
     delete_key("PYTORCH_HIP_ALLOC_CONF")
     delete_key("PYTORCH_ALLOC_CONF")
+=======
+    elif DEVICE_TYPE == "cuda":
+        delete_key("PYTORCH_HIP_ALLOC_CONF")
+        delete_key("PYTORCH_ALLOC_CONF")
+    elif DEVICE_TYPE == "npu": # Unsloth-PTO-FIXME: check npu devices
+        delete_key("PYTORCH_CUDA_ALLOC_CONF")
+        delete_key("PYTORCH_HIP_ALLOC_CONF")
+        delete_key("PYTORCH_ALLOC_CONF")
+>>>>>>> 451a4dd ([dev] update the init commit of npu)
 
 # CCE fails on Torch 2.8 and above
 # OutOfResources: out of resource: shared memory, Required: 98304, Hardware limit: 65536. Reducing block sizes or `num_stages`
@@ -271,9 +283,15 @@ if (major_torch >= 2 and minor_torch >= 8) or (major_torch > 2):
 elif DEVICE_TYPE == "hip":
     # CCE also fails in HIP / AMD
     os.environ["UNSLOTH_ENABLE_CCE"] = "0"
+<<<<<<< HEAD
 del remove_expandable_segments, delete_key, IS_HIP_RUNTIME, IS_TORCH_2_9_OR_NEWER, IS_TORCH_ROCM_BUILD, major_torch, minor_torch, torch_version, torch_version_raw, importlib_version, find_spec
 del clean_expandable_segments_value
 del _ORIGINAL_PYTORCH_CUDA_ALLOC_CONF, _ORIGINAL_PYTORCH_HIP_ALLOC_CONF, _HAS_ORIGINAL_PYTORCH_ALLOC_CONF
+=======
+elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+    os.environ["UNSLOTH_ENABLE_CCE"] = "0"
+del delete_key, major_torch, minor_torch, torch_version, importlib_version, find_spec
+>>>>>>> 451a4dd ([dev] update the init commit of npu)
 
 if not ("UNSLOTH_IS_PRESENT" in os.environ):
     raise ImportError("Please install Unsloth via `pip install unsloth`!")
@@ -286,9 +304,10 @@ except:
 # Log Unsloth-Zoo Utilities
 os.environ["UNSLOTH_ZOO_IS_PRESENT"] = "1"
 
-from .temporary_patches import (
-    encode_conversations_with_harmony,
-)
+# Unsloth-PTO-FIXME: support encode_conversations_with_harmony in gpt_oss
+# from .temporary_patches import (
+#     encode_conversations_with_harmony,
+# )
 from .rl_environments import (
     check_python_modules,
     create_locked_down_function,

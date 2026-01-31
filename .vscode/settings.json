@@ -1,0 +1,64 @@
+{
+    "todo-tree.general.tags": [
+        // "TODO",
+        // "FIXME",
+        // "HACK",
+        // "XXX",
+        "Unsloth-PTO-TODO",
+        "Unsloth-PTO-DONE",
+        "Unsloth-PTO-WIP",
+        "Unsloth-PTO-FIXME",
+        "Unsloth-PTO-VERIFY"
+    ],
+    "todo-tree.highlights.enabled": true,
+    "todo-tree.highlights.highlightWholeTag": true,
+    "todo-tree.highlights.defaultHighlight": {
+        "type": "tag"
+    },
+    "todo-tree.highlights.customHighlight": {
+        "Unsloth-PTO-TODO": {
+            "icon": "checklist",
+            "foreground": "#fff",
+            "background": "#f59e0b",
+            "iconColour": "#f59e0b",
+            "type": "tag"
+        },
+        "Unsloth-PTO-DONE": {
+            "icon": "check-circle",
+            "foreground": "#fff",
+            "background": "#10b981",
+            "iconColour": "#10b981",
+            "type": "tag"
+        },
+        "Unsloth-PTO-WIP": {
+            "icon": "tools",
+            "foreground": "#fff",
+            "background": "#3b82f6",
+            "iconColour": "#3b82f6",
+            "type": "tag"
+        },
+        "Unsloth-PTO-FIXME": {
+            "icon": "alert",
+            "foreground": "#fff",
+            "background": "#ef4444",
+            "iconColour": "#ef4444",
+            "type": "tag"
+        },
+        "Unsloth-PTO-VERIFY": {
+            "icon": "question",
+            "foreground": "#fff",
+            "background": "#8b5cf6",
+            "iconColour": "#8b5cf6",
+            "type": "tag"
+        }
+    },
+    "todo-tree.regex.regex": "(//|#|<!--|;|/\\*|^)\\s*($TAGS)",
+    "todo-tree.regex.regexCaseSensitive": false,
+    "todo-tree.general.tagGroups": {
+        "待完成": ["Unsloth-PTO-TODO", "TODO"],
+        "进行中": ["Unsloth-PTO-WIP"],
+        "已完成": ["Unsloth-PTO-DONE"],
+        "需修复": ["Unsloth-PTO-FIXME", "FIXME"],
+        "需验证": ["Unsloth-PTO-VERIFY"]
+    }
+}

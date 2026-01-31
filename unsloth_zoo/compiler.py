@@ -90,6 +90,8 @@ elif DEVICE_TYPE == "hip":
     OLD_CUDA_ARCH_VERSION = False
 elif DEVICE_TYPE == "xpu":
     OLD_CUDA_ARCH_VERSION = False
+elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+    OLD_CUDA_ARCH_VERSION = False
 pass
 
 OLD_TRITON_VERSION = Version(triton.__version__) < Version("3.0.0")

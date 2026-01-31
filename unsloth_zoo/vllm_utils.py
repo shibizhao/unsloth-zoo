@@ -101,6 +101,8 @@ def get_target_device(index = 0):
 def get_mem_info():
     if DEVICE_TYPE == "xpu":
         free_memory, total_memory = torch.xpu.mem_get_info()
+    elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+        free_memory, total_memory = torch.npu.mem_get_info()
     else:
         free_memory, total_memory = torch.cuda.mem_get_info()
     return free_memory, total_memory
@@ -1915,6 +1917,8 @@ def load_vllm(
         _dtype = torch.bfloat16
     elif DEVICE_TYPE == "xpu":
         _dtype = torch.bfloat16
+    elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+        _dtype = torch.bfloat16
     else:
         _dtype = torch.float16
     if dtype == torch.bfloat16 and _dtype == torch.float16:
@@ -2007,6 +2011,8 @@ def load_vllm(
     elif DEVICE_TYPE == "hip":
         enable_prefix_caching = True
     elif DEVICE_TYPE == "xpu":
+        enable_prefix_caching = True
+    elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
         enable_prefix_caching = True
     pass
 
@@ -2107,6 +2113,10 @@ def load_vllm(
         platform = "Intel GPU"
         gpu_eu_count = torch.xpu.get_device_properties(0).gpu_eu_count
         message = f"{platform} has eu:{gpu_eu_count}"
+    elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+        platform = "Ascend NPU"
+        npu_name = torch.npu.get_device_properties(0).name
+        message = f"{platform} has name:{npu_name}"
     else:
         platform = "CUDA"
         major_version, minor_version = torch.cuda.get_device_capability()

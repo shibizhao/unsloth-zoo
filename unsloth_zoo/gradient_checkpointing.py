@@ -62,6 +62,11 @@ else:
     torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = "cuda")
 pass
 
+# Unsloth-PTO-VERIFY: check torch_npu functions
+if DEVICE_TYPE == "npu":
+    torch_amp_custom_fwd = torch.npu.amp.custom_fwd
+    torch_amp_custom_bwd = torch.npu.amp.custom_bwd
+
 
 def _calculate_n_gradient_checkpoints(
     n_layers : int,
@@ -313,6 +318,8 @@ if DEVICE_TYPE in ("cuda", "hip"):
     torch_gpu_stream = torch.cuda.stream
 elif DEVICE_TYPE == "xpu":
     torch_gpu_stream = torch.xpu.stream
+elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+    torch_gpu_stream = torch.npu.stream
 
 CPU_BUFFERS = []
 CPU_INDEX = None
@@ -341,6 +348,8 @@ def initialize_unsloth_gradient_checkpointing(dtype = None):
             SUPPORTS_BFLOAT16 = True
         elif DEVICE_TYPE == "xpu":
             SUPPORTS_BFLOAT16 = True
+        elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+            SUPPORTS_BFLOAT16 = True
         dtype = torch.bfloat16 if SUPPORTS_BFLOAT16 else torch.float16
     pass
 
@@ -350,7 +359,13 @@ def initialize_unsloth_gradient_checkpointing(dtype = None):
     pass
 
     # Allocate buffers to how many GPUs
-    n_gpus = torch.cuda.device_count() if DEVICE_TYPE in ("cuda", "hip") else torch.xpu.device_count()
+    # n_gpus = torch.cuda.device_count() if DEVICE_TYPE in ("cuda", "hip") else torch.xpu.device_count()
+    if DEVICE_TYPE in ("cuda", "hip"):
+        n_gpus = torch.cuda.device_count()
+    elif DEVICE_TYPE == "xpu":
+        n_gpus = torch.xpu.device_count()
+    elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+        n_gpus = torch.npu.device_count()
     try:
         GPU_BUFFERS = tuple([torch.empty(2*256*2048, dtype = dtype, device = f"{DEVICE_TYPE_TORCH}:{i}") for i in range(n_gpus)])
     except Exception as e:
@@ -362,11 +377,20 @@ def initialize_unsloth_gradient_checkpointing(dtype = None):
         raise
 
     BACKWARD_PASS = True
-    EXTRA_STREAMS = tuple([torch.cuda.Stream() if DEVICE_TYPE_TORCH == "cuda" else torch.xpu.Stream() for i in range(n_gpus)])
+    # Unsloth-PTO-VERIFY: native implementations
+    # EXTRA_STREAMS = tuple([torch.cuda.Stream() if DEVICE_TYPE_TORCH == "cuda" else torch.xpu.Stream() for i in range(n_gpus)])
+    
+    # Unsloth-PTO-VERIFY: check npu devices
     if DEVICE_TYPE in ("cuda", "hip"):
+        EXTRA_STREAMS = tuple([torch.cuda.Stream() for i in range(n_gpus)])
         MAIN_STREAMS  = tuple([torch.cuda.default_stream(torch.device(f"cuda:{i}")) for i in range(n_gpus)])
     elif DEVICE_TYPE == "xpu":
+        EXTRA_STREAMS = tuple([torch.xpu.Stream() for i in range(n_gpus)])
         MAIN_STREAMS  = tuple([torch.xpu.current_stream(torch.device(f"xpu:{i}")) for i in range(n_gpus)])
+    elif DEVICE_TYPE == "npu":
+        EXTRA_STREAMS = tuple([torch.npu.Stream() for i in range(n_gpus)])
+        MAIN_STREAMS  = tuple([torch.npu.current_stream(torch.device(f"npu:{i}")) for i in range(n_gpus)])
+
 
     # Minimum size to enable Unsloth GC is 2MB -> 32 layers = 64MB
     n_bytes = torch.finfo(dtype).bits // 8

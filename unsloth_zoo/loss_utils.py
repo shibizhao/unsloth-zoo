@@ -60,6 +60,12 @@ elif DEVICE_TYPE == "xpu":
         HAS_CUT_CROSS_ENTROPY = True
     except:
         HAS_CUT_CROSS_ENTROPY = False
+elif DEVICE_TYPE == "npu": # Unsloth-PTO-FIXME: check torch_npu
+    try:
+        from cut_cross_entropy import linear_cross_entropy
+        HAS_CUT_CROSS_ENTROPY = True
+    except:
+        HAS_CUT_CROSS_ENTROPY = False
 else:
     HAS_CUT_CROSS_ENTROPY = False
 pass
@@ -168,8 +174,17 @@ def post_patch_loss_function(model):
     return model
 pass
 
+# # Unsloth-PTO-VERIFY: native implementations of device
+# current_device = torch.xpu.device if DEVICE_TYPE == "xpu" else torch.cuda.device
 
-current_device = torch.xpu.device if DEVICE_TYPE == "xpu" else torch.cuda.device
+# Unsloth-PTO-VERIFY
+if DEVICE_TYPE == "xpu":
+    current_device = torch.xpu.device
+elif DEVICE_TYPE == "npu":
+    current_device = torch.npu.device
+else:
+    current_device = torch.cuda.device
+
 def fused_linear_cross_entropy(
     hidden_states      : torch.Tensor,
     lm_weight          : torch.Tensor,

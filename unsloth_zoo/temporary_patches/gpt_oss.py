@@ -14,6 +14,8 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+# Unsloth-PTO-FIXME: support gpt_oss with *cuda* and *xpu* devices
+
 from typing import Any, List, Optional, Tuple, Union, Dict, Set, Callable
 import os
 import torch
@@ -1137,6 +1139,8 @@ from ..device_type import DEVICE_TYPE
 
 if DEVICE_TYPE == "xpu":
     device_memory = torch.xpu.memory.mem_get_info(0)[-1]
+elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+    device_memory = torch.npu.memory.mem_get_info(0)[-1]
 else:
     device_memory = torch.cuda.memory.mem_get_info(0)[-1]
 use_combo_kernels = False if device_memory/1024/1024/1024 <= 40 else True
