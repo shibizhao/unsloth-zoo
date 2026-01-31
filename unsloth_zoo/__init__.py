@@ -16,6 +16,8 @@
 
 __version__ = "2026.1.4"
 
+# Unsloth-PTO-FIXME: set the environment variables for the *npu* device
+
 import os
 import warnings
 import re
@@ -170,6 +172,10 @@ else:
     elif DEVICE_TYPE == "cuda":
         delete_key("PYTORCH_HIP_ALLOC_CONF")
         delete_key("PYTORCH_ALLOC_CONF")
+    elif DEVICE_TYPE == "npu": # Unsloth-PTO-FIXME: check npu devices
+        delete_key("PYTORCH_CUDA_ALLOC_CONF")
+        delete_key("PYTORCH_HIP_ALLOC_CONF")
+        delete_key("PYTORCH_ALLOC_CONF")
 
 # CCE fails on Torch 2.8 and above
 # OutOfResources: out of resource: shared memory, Required: 98304, Hardware limit: 65536. Reducing block sizes or `num_stages`
@@ -177,6 +183,8 @@ if (major_torch >= 2 and minor_torch >= 8) or (major_torch > 2):
     os.environ["UNSLOTH_ENABLE_CCE"] = "0"
 elif DEVICE_TYPE == "hip":
     # CCE also fails in HIP / AMD
+    os.environ["UNSLOTH_ENABLE_CCE"] = "0"
+elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
     os.environ["UNSLOTH_ENABLE_CCE"] = "0"
 del delete_key, major_torch, minor_torch, torch_version, importlib_version, find_spec
 
@@ -191,9 +199,10 @@ except:
 # Log Unsloth-Zoo Utilities
 os.environ["UNSLOTH_ZOO_IS_PRESENT"] = "1"
 
-from .temporary_patches import (
-    encode_conversations_with_harmony,
-)
+# Unsloth-PTO-FIXME: support encode_conversations_with_harmony in gpt_oss
+# from .temporary_patches import (
+#     encode_conversations_with_harmony,
+# )
 from .rl_environments import (
     check_python_modules,
     create_locked_down_function,

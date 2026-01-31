@@ -27,8 +27,11 @@ from .device_type import DEVICE_TYPE
 from .temporary_patches.common import torch_compile_options
 RL_REPLACEMENTS = dict()
 
+# Unsloth-PTO-FIXME: update the torch compile functions
+
+# Unsloth-PTO-FIXME
 # https://github.com/huggingface/trl/blob/main/trl/trainer/utils.py#L1674
-@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+# @torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
 def selective_log_softmax(logits, index):
     logits = logits.to(torch.float32)
     selected_logits = torch.gather(logits, dim = -1, index = index.unsqueeze(-1)).squeeze(-1)
@@ -39,9 +42,10 @@ def selective_log_softmax(logits, index):
     return per_token_logps
 pass
 
+# Unsloth-PTO-FIXME
 # More memory efficient by chunking on (bsz+qlen) dimension
 # Exactly equivalent to the above
-@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+# @torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
 def chunked_selective_log_softmax(logits, index):
     # Split into 4 chunks only
     chunked_logits = torch.chunk(logits.reshape(-1, logits.shape[-1]), chunks = 4, dim = 0)
@@ -62,7 +66,8 @@ pass
 
 RL_REPLACEMENTS["selective_log_softmax"] = chunked_selective_log_softmax
 
-@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+# Unsloth-PTO-FIXME
+# @torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
 def chunked_hidden_states_selective_log_softmax(
     hidden_states: torch.Tensor,
     lm_head: torch.Tensor,
@@ -166,8 +171,9 @@ def left_pack_padding(tensor: torch.Tensor, pad_id: int) -> torch.Tensor:
     Moves all padding tokens in each sequence of a batch to the right.
     """
     mask = (tensor != pad_id)
+    # Unsloth-PTO-FIXME
     # Must do stable=True since binary mark is unordered
-    sorted_indices = torch.argsort(mask, dim=1, descending=True, stable=True)
+    sorted_indices = torch.argsort(mask.to(torch.int32), dim=1, descending=True, stable=True)
     packed_tensor = torch.gather(tensor, 1, sorted_indices)
     return packed_tensor
 pass
@@ -239,6 +245,13 @@ def autotune_batch_and_chunks(
     
     if torch.cuda.is_available():
         free_bytes, _ = torch.cuda.mem_get_info()
+        limit_gb = (free_bytes / (1024**3))*.80
+    # Unsloth-PTO-FIXME
+    elif torch.npu.is_available():
+        free_bytes, _ = torch.npu.mem_get_info()
+        limit_gb = (free_bytes / (1024**3))*.80
+    elif torch.xpu.is_available():
+        free_bytes, _ = torch.xpu.mem_get_info()
         limit_gb = (free_bytes / (1024**3))*.80
 
     bytes_to_gb = 1024**3
@@ -419,8 +432,13 @@ def grpo_compute_loss(
     return loss, completion_length, mean_kl, delta, flat_is_ratio
 pass
 RL_REPLACEMENTS["grpo_compute_loss"]      = grpo_compute_loss
+
+# Unsloth-PTO-FIXME
+# Skip torch.compile on NPU as Triton is not supported
+_is_npu_env = "import torch; _is_npu = hasattr(torch, 'npu') and torch.npu.is_available()"
+# f"@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options)\n"\
 RL_REPLACEMENTS["grpo_compute_loss_slow"] = \
-    f"@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options)\n"\
+    f"# torch.compile disabled on NPU\n"\
     f"{inspect.getsource(grpo_compute_loss)}"
 RL_REPLACEMENTS["grpo_compute_loss_slow"] = \
     RL_REPLACEMENTS["grpo_compute_loss_slow"].replace(
@@ -486,13 +504,17 @@ class UnslothEfficientGRPO(torch.autograd.Function):
             grad_inputs_j[:] = chunk_grad_input
         pass
 
-        accumulate_chunk = torch.compile(
-            accumulate_chunk,
-            fullgraph = True,
-            # [TODO] Dynamic marking causes torch.compile errors if sequence length is long
-            dynamic = True,
-            options = torch_compile_options,
-        )
+        # Unsloth-PTO-FIXME
+        # Skip torch.compile on NPU as it's not fully supported
+        _is_npu = hasattr(torch, 'npu') and torch.npu.is_available()
+        if not _is_npu:
+            accumulate_chunk = torch.compile(
+                accumulate_chunk,
+                fullgraph = True,
+                # [TODO] Dynamic marking causes torch.compile errors if sequence length is long
+                dynamic = True,
+                options = torch_compile_options,
+            )
 
         grad_inputs_chunks = torch.chunk(grad_inputs,        chunks = n_chunks, dim = 0)
         new_logps  = torch.chunk(_new_logps, chunks = n_chunks, dim = 0)
@@ -824,6 +846,26 @@ def grpo_accumulated_loss(
     def efficient_log_softmax(hidden_states, lm_head, index, chunks=32, 
                             logit_scale_multiply=0.0, logit_scale_divide=0.0, 
                             logit_softcapping=0.0, temperature=1, batch_size=8):
+        # Unsloth-PTO-FIXME
+        
+        # Check if we got hidden_states (shape [..., hidden_size]) or actual logits (shape [..., vocab_size])
+        # hidden_size should match lm_head.shape[1], vocab_size should match lm_head.shape[0]
+        hidden_size = lm_head.shape[1]
+        last_dim = hidden_states.shape[-1]
+        
+        if last_dim != hidden_size:
+            # Model returned actual logits, apply scaling and use selective_log_softmax directly
+            logits = hidden_states
+            if logit_scale_multiply != 0.0:
+                logits = logits * logit_scale_multiply
+            if logit_scale_divide != 0.0:
+                logits = logits / logit_scale_divide
+            if logit_softcapping != 0.0:
+                logits = logits * torch.tanh(logits / logit_softcapping)
+            if temperature != 1.0:
+                logits = logits / temperature
+            return chunked_selective_log_softmax(logits, index)
+        
         if (index.shape[1] <= 1024 and batch_size <= 8) or batch_size==1:
             #We save a gigabyte or speed with the normal path under these specific conditions
             return chunked_hidden_states_selective_log_softmax(
@@ -891,8 +933,15 @@ def grpo_accumulated_loss(
                     batch_size = B
                 )
                 #This is needed to avoid race conditions with GPT OSS offload_embbed=True
-                #However, it seems that this line does not slow down or disrupt models. 
-                torch.cuda.synchronize()
+                #However, it seems that this line does not slow down or disrupt models.
+                # Use device-agnostic synchronization (detect at runtime)
+                # Unsloth-PTO-VERIFY
+                if hasattr(torch, 'npu') and torch.npu.is_available():
+                    torch.npu.synchronize()
+                elif hasattr(torch, 'xpu') and torch.xpu.is_available():
+                    torch.xpu.synchronize()
+                elif hasattr(torch, 'cuda') and torch.cuda.is_available():
+                    torch.cuda.synchronize()
             all_logprobs_list.append(logprobs_chunk)
 
     new_logprobs = torch.cat(all_logprobs_list, dim=0)
