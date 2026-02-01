@@ -288,7 +288,8 @@ def _get_compile_folder(use_tempfile = False):
     global UNSLOTH_COMPILE_USE_TEMP
     if UNSLOTH_COMPILE_USE_TEMP or use_tempfile:
         UNSLOTH_COMPILE_USE_TEMP = True
-        leaf = os.path.basename(UNSLOTH_COMPILE_LOCATION)
+        user = os.getlogin()
+        leaf = os.path.basename(UNSLOTH_COMPILE_LOCATION)+user
         location = os.path.join(tempfile.gettempdir(), leaf)
         logger.info(
             f"Unsloth: We'll be using `{location}` for temporary Unsloth patches."
