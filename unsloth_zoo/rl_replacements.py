@@ -33,7 +33,7 @@ RL_REPLACEMENTS = dict()
 
 # Unsloth-PTO-FIXME
 # https://github.com/huggingface/trl/blob/main/trl/trainer/utils.py#L1674
-# @torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
 def selective_log_softmax(logits, index):
     logits = logits.to(torch.float32)
     selected_logits = torch.gather(logits, dim = -1, index = index.unsqueeze(-1)).squeeze(-1)
@@ -47,7 +47,7 @@ pass
 # Unsloth-PTO-FIXME
 # More memory efficient by chunking on (bsz+qlen) dimension
 # Exactly equivalent to the above
-# @torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
 def chunked_selective_log_softmax(logits, index):
     # Split into 4 chunks only
     chunked_logits = torch.chunk(logits.reshape(-1, logits.shape[-1]), chunks = 4, dim = 0)
@@ -71,7 +71,7 @@ pass
 RL_REPLACEMENTS["selective_log_softmax"] = chunked_selective_log_softmax
 
 # Unsloth-PTO-FIXME
-# @torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
+@torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
 def chunked_hidden_states_selective_log_softmax(
     hidden_states: torch.Tensor,
     lm_head: torch.Tensor,
