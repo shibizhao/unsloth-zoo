@@ -48,7 +48,7 @@ pass
 # More memory efficient by chunking on (bsz+qlen) dimension
 # Exactly equivalent to the above
 @torch.compile(dynamic = True, fullgraph = True, options = torch_compile_options,)
-def chunked_selective_log_softmax(logits, index):
+def chunked_selective_log_softmax(logits, index, temperature: float = 1.0):
     # Split into 4 chunks only
     chunked_logits = torch.chunk(logits.reshape(-1, logits.shape[-1]), chunks = 4, dim = 0)
     chunked_index  = torch.chunk(index.reshape(-1), chunks = 4, dim = 0)
@@ -249,6 +249,10 @@ def autotune_batch_and_chunks(
 
     if torch.cuda.is_available():
         free_bytes, _ = torch.cuda.mem_get_info()
+        limit_gb = (free_bytes / (1024**3))*.80
+    # Unsloth-NPU-FIXME:
+    elif torch.npu.is_available():
+        free_bytes, _ = torch.npu.mem_get_info()
         limit_gb = (free_bytes / (1024**3))*.80
 
     bytes_to_gb = 1024**3
@@ -923,17 +927,9 @@ def grpo_accumulated_loss(
         last_dim = hidden_states.shape[-1]
         
         if last_dim != hidden_size:
-            # Model returned actual logits, apply scaling and use selective_log_softmax directly
-            logits = hidden_states
-            if logit_scale_multiply != 0.0:
-                logits = logits * logit_scale_multiply
-            if logit_scale_divide != 0.0:
-                logits = logits / logit_scale_divide
-            if logit_softcapping != 0.0:
-                logits = logits * torch.tanh(logits / logit_softcapping)
-            if temperature != 1.0:
-                logits = logits / temperature
-            return chunked_selective_log_softmax(logits, index)
+            # Some model paths return final logits even when hidden states were
+            # requested, so skip re-projecting through lm_head.
+            return chunked_selective_log_softmax(hidden_states, index, temperature)
         
         if (index.shape[1] <= 1024 and batch_size <= 8) or batch_size==1:
             #We save a gigabyte or speed with the normal path under these specific conditions
@@ -1027,7 +1023,8 @@ def grpo_accumulated_loss(
                         logprobs_chunk = chunked_selective_log_softmax(new_hidden_states_chunk, completion_ids, temperature)
                 #This is needed to avoid race conditions with GPT OSS offload_embbed=True
                 #However, it seems that this line does not slow down or disrupt models. 
-                torch.cuda.synchronize()
+                # torch.cuda.synchronize()
+                device_synchronize()
             all_logprobs_list.append(logprobs_chunk)
 
     new_logprobs = torch.cat(all_logprobs_list, dim=0)

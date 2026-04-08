@@ -278,4 +278,7 @@ def device_synchronize():
     elif DEVICE_TYPE == "xpu":
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             torch.xpu.synchronize()
+    elif DEVICE_TYPE == "npu": # Unsloth-PTO-VERIFY: check npu devices
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            torch.npu.synchronize()
 pass
