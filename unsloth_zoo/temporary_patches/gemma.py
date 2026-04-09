@@ -36,6 +36,26 @@ from .utils import (
 )
 import inspect
 
+_UNSLOTH_FLEX_ATTENTION_DISABLED = os.environ.get("UNSLOTH_ENABLE_FLEX_ATTENTION", "1") == "0"
+
+
+def _make_gemma3_attn_forwards(forward_function, has_cache_position):
+    """Build past_key_value / past_key_values forward variants for Gemma3Attention."""
+    functions = []
+    if has_cache_position:
+        def forward_past_key_value(self, hidden_states, position_embeddings=None, attention_mask=None, past_key_value=None, cache_position=None, **kwargs):
+            return forward_function(self, hidden_states, position_embeddings, attention_mask, past_key_value, cache_position, **kwargs)
+        def forward_past_key_values(self, hidden_states, position_embeddings=None, attention_mask=None, past_key_values=None, cache_position=None, **kwargs):
+            return forward_function(self, hidden_states, position_embeddings, attention_mask, past_key_values, cache_position, **kwargs)
+    else:
+        def forward_past_key_value(self, hidden_states, position_embeddings=None, attention_mask=None, past_key_value=None, **kwargs):
+            return forward_function(self, hidden_states, position_embeddings, attention_mask, past_key_value, kwargs.pop("cache_position", None), **kwargs)
+        def forward_past_key_values(self, hidden_states, position_embeddings=None, attention_mask=None, past_key_values=None, **kwargs):
+            return forward_function(self, hidden_states, position_embeddings, attention_mask, past_key_values, kwargs.pop("cache_position", None), **kwargs)
+    functions.append(forward_past_key_value)
+    functions.append(forward_past_key_values)
+    return functions
+
 
 def patch_Gemma3Processor():
     import re
@@ -48,12 +68,18 @@ def patch_Gemma3Processor():
     except Exception as e:
         return raise_error("Gemma3Processor.__call__", e)
 
-    def __call__(
+    # Check if the target __call__ has `videos` or `audio` arguments
+    target_call = transformers.models.gemma3.processing_gemma3.Gemma3Processor.__call__
+    target_params = inspect.signature(target_call).parameters
+    has_videos = "videos" in target_params
+    has_audio = "audio" in target_params
+
+    def _gemma3_call_impl(
         self,
         images: ImageInput = None,
         text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
-        videos = None,
-        audio = None,
+        videos: ImageInput = None,
+        audio: Any = None,
         **kwargs: Unpack[Gemma3ProcessorKwargs],
     ) -> BatchFeature:
         if text is None and images is None:
@@ -151,7 +177,21 @@ def patch_Gemma3Processor():
             text_inputs["token_type_ids"] = mm_token_type_ids#.tolist()
         return BatchFeature(data={**text_inputs, **image_inputs}, tensor_type=return_tensors)
     pass
-    patch_function(transformers.models.gemma3.processing_gemma3.Gemma3Processor, "__call__", __call__)
+
+    if has_videos or has_audio:
+        __call__ = _gemma3_call_impl
+    else:
+        def __call__(
+            self,
+            images: ImageInput = None,
+            text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
+            **kwargs: Unpack[Gemma3ProcessorKwargs],
+        ) -> BatchFeature:
+            videos = kwargs.pop("videos", None)
+            audio = kwargs.pop("audio", None)
+            return _gemma3_call_impl(self, images=images, text=text, videos=videos, audio=audio, **kwargs)
+
+    patch_function(transformers.models.gemma3.processing_gemma3.Gemma3Processor, "__call__", __call__, match_level="relaxed")
 pass
 TEMPORARY_PATCHES.append(patch_Gemma3Processor)
 
@@ -369,7 +409,7 @@ def patch_Gemma3Attention():
 
         # 6. Core Attention mechanism (SDPA) in fp32
         attn_mask_for_sdpa = attention_mask
-        if attn_mask_for_sdpa is not None and attn_mask_for_sdpa.dtype != torch.bool:
+        if isinstance(attn_mask_for_sdpa, torch.Tensor) and attn_mask_for_sdpa.dtype != torch.bool:
             attn_mask_for_sdpa = attn_mask_for_sdpa.to(torch.float32)
         return (
             query_states_fp32.contiguous(),
@@ -385,8 +425,8 @@ def patch_Gemma3Attention():
     def forward_function(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
+        position_embeddings: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: KWARGS_TYPE,
@@ -473,25 +513,44 @@ def patch_Gemma3Attention():
             attn_mask_for_sdpa = attn_mask_for_sdpa.to(torch.float32)
         """
         # output_attentions = kwargs.get("output_attentions", False)
-        is_causal = query_states_fp32.shape[2] > 1 and attn_mask_for_sdpa is None and getattr(self, "is_causal", True)
-        # Shapes (e.g. query.shape[2]) are tensors during jit tracing, resulting in `is_causal` being a tensor.
-        # We convert it to a bool for the SDPA kernel that only accepts bools.
-        if torch_jit_is_tracing() and isinstance(is_causal, torch.Tensor): is_causal = is_causal.item()
-        attn_output_fp32 = scaled_dot_product_attention(
-            query_states_fp32.contiguous(),
-            key_states_fp32.contiguous(),
-            value_states_fp32.contiguous(),
-            attn_mask = attn_mask_for_sdpa,
-            dropout_p = self.attention_dropout if self.training else 0.0,
-            is_causal = is_causal,
-            scale = getattr(self, "scaling", None), # Use self.scaling if defined, else SDPA default
-            enable_gqa = getattr(self, "num_key_value_groups", 1) != 1,
-        )
-        attn_weights = None # Defaulting to None
+        attn_impl = getattr(self.config, "_attn_implementation", "sdpa")
+        if _UNSLOTH_FLEX_ATTENTION_DISABLED:
+            attn_impl = "sdpa"
+        if attn_impl == "flex_attention":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[attn_impl]
+            attn_output_fp32, attn_weights = attention_interface(
+                self,
+                query_states_fp32,
+                key_states_fp32,
+                value_states_fp32,
+                attn_mask_for_sdpa,
+                dropout = self.attention_dropout if self.training else 0.0,
+                scaling = getattr(self, "scaling", None),
+                sliding_window = getattr(self, "sliding_window", None),
+                **kwargs,
+            )
+        else:
+            is_causal = query_states_fp32.shape[2] > 1 and attn_mask_for_sdpa is None and getattr(self, "is_causal", True)
+            # Shapes (e.g. query.shape[2]) are tensors during jit tracing, resulting in `is_causal` being a tensor.
+            # We convert it to a bool for the SDPA kernel that only accepts bools.
+            if torch_jit_is_tracing() and isinstance(is_causal, torch.Tensor): is_causal = is_causal.item()
+            attn_output_fp32 = scaled_dot_product_attention(
+                query_states_fp32.contiguous(),
+                key_states_fp32.contiguous(),
+                value_states_fp32.contiguous(),
+                attn_mask = attn_mask_for_sdpa,
+                dropout_p = self.attention_dropout if self.training else 0.0,
+                is_causal = is_causal,
+                scale = getattr(self, "scaling", None), # Use self.scaling if defined, else SDPA default
+                enable_gqa = getattr(self, "num_key_value_groups", 1) != 1,
+            )
+            attn_weights = None # Defaulting to None
 
         # 7. Reshape and Downcast for Output Projection
-        # attn_output_fp32 from SDPA is (bsz, num_heads, q_len, head_dim)
-        attn_output_fp32 = attn_output_fp32.transpose(1, 2).contiguous()
+        # SDPA returns (bsz, num_heads, q_len, head_dim) and needs transposing
+        # flex_attention returns (bsz, q_len, num_heads, head_dim) already transposed
+        if attn_impl != "flex_attention":
+            attn_output_fp32 = attn_output_fp32.transpose(1, 2).contiguous()
 
         # Reshape to (bsz, q_len, num_query_heads * head_dim) which is (bsz, q_len, model_hidden_size)
         # Using -1 for the last dimension is robust and aligns with your original example.
@@ -505,30 +564,11 @@ def patch_Gemma3Attention():
         return attn_output_projected, attn_weights # 3-tuple return
     pass
 
-    functions = []
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
-        past_key_value: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs: KWARGS_TYPE,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
-        return forward_function(self, hidden_states, position_embeddings, attention_mask, past_key_value, cache_position, **kwargs)
-    functions.append(forward)
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs: KWARGS_TYPE,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
-        return forward_function(self, hidden_states, position_embeddings, attention_mask, past_key_values, cache_position, **kwargs)
-    functions.append(forward)
-    patch_function_past_key_values(transformers.models.gemma3.modeling_gemma3.Gemma3Attention, "forward", functions)
+    has_cache_position = "cache_position" in inspect.signature(
+        transformers.models.gemma3.modeling_gemma3.Gemma3Attention.forward
+    ).parameters
+    functions = _make_gemma3_attn_forwards(forward_function, has_cache_position)
+    patch_function_past_key_values(transformers.models.gemma3.modeling_gemma3.Gemma3Attention, "forward", functions, match_level="relaxed")
 pass
 TEMPORARY_PATCHES.append(patch_Gemma3Attention)
 
@@ -603,7 +643,7 @@ def patch_Gemma3Attention_generic():
 
         # 6. Core Attention mechanism (SDPA) in fp32
         attn_mask_for_sdpa = attention_mask
-        if attn_mask_for_sdpa is not None and attn_mask_for_sdpa.dtype != torch.bool:
+        if isinstance(attn_mask_for_sdpa, torch.Tensor) and attn_mask_for_sdpa.dtype != torch.bool:
             attn_mask_for_sdpa = attn_mask_for_sdpa#.to(torch.float32)
             attn_mask_for_sdpa = attn_mask_for_sdpa.to(query_states_fp32.dtype)
         return (
@@ -621,8 +661,8 @@ def patch_Gemma3Attention_generic():
     def forward_function(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
+        position_embeddings: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: KWARGS_TYPE,
@@ -709,25 +749,44 @@ def patch_Gemma3Attention_generic():
             attn_mask_for_sdpa = attn_mask_for_sdpa.to(torch.float32)
         """
         # output_attentions = kwargs.get("output_attentions", False)
-        is_causal = query_states_fp32.shape[2] > 1 and attn_mask_for_sdpa is None and getattr(self, "is_causal", True)
-        # Shapes (e.g. query.shape[2]) are tensors during jit tracing, resulting in `is_causal` being a tensor.
-        # We convert it to a bool for the SDPA kernel that only accepts bools.
-        if torch_jit_is_tracing() and isinstance(is_causal, torch.Tensor): is_causal = is_causal.item()
-        attn_output_fp32 = scaled_dot_product_attention(
-            query_states_fp32.contiguous(),
-            key_states_fp32.contiguous(),
-            value_states_fp32.contiguous(),
-            attn_mask = attn_mask_for_sdpa,
-            dropout_p = self.attention_dropout if self.training else 0.0,
-            is_causal = is_causal,
-            scale = getattr(self, "scaling", None), # Use self.scaling if defined, else SDPA default
-            enable_gqa = getattr(self, "num_key_value_groups", 1) != 1,
-        )
-        attn_weights = None # Defaulting to None
+        attn_impl = getattr(self.config, "_attn_implementation", "sdpa")
+        if _UNSLOTH_FLEX_ATTENTION_DISABLED:
+            attn_impl = "sdpa"
+        if attn_impl == "flex_attention":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[attn_impl]
+            attn_output_fp32, attn_weights = attention_interface(
+                self,
+                query_states_fp32,
+                key_states_fp32,
+                value_states_fp32,
+                attn_mask_for_sdpa,
+                dropout = self.attention_dropout if self.training else 0.0,
+                scaling = getattr(self, "scaling", None),
+                sliding_window = getattr(self, "sliding_window", None),
+                **kwargs,
+            )
+        else:
+            is_causal = query_states_fp32.shape[2] > 1 and attn_mask_for_sdpa is None and getattr(self, "is_causal", True)
+            # Shapes (e.g. query.shape[2]) are tensors during jit tracing, resulting in `is_causal` being a tensor.
+            # We convert it to a bool for the SDPA kernel that only accepts bools.
+            if torch_jit_is_tracing() and isinstance(is_causal, torch.Tensor): is_causal = is_causal.item()
+            attn_output_fp32 = scaled_dot_product_attention(
+                query_states_fp32.contiguous(),
+                key_states_fp32.contiguous(),
+                value_states_fp32.contiguous(),
+                attn_mask = attn_mask_for_sdpa,
+                dropout_p = self.attention_dropout if self.training else 0.0,
+                is_causal = is_causal,
+                scale = getattr(self, "scaling", None), # Use self.scaling if defined, else SDPA default
+                enable_gqa = getattr(self, "num_key_value_groups", 1) != 1,
+            )
+            attn_weights = None # Defaulting to None
 
         # 7. Reshape and Downcast for Output Projection
-        # attn_output_fp32 from SDPA is (bsz, num_heads, q_len, head_dim)
-        attn_output_fp32 = attn_output_fp32.transpose(1, 2).contiguous()
+        # SDPA returns (bsz, num_heads, q_len, head_dim) and needs transposing
+        # flex_attention returns (bsz, q_len, num_heads, head_dim) already transposed
+        if attn_impl != "flex_attention":
+            attn_output_fp32 = attn_output_fp32.transpose(1, 2).contiguous()
 
         # Reshape to (bsz, q_len, num_query_heads * head_dim) which is (bsz, q_len, model_hidden_size)
         # Using -1 for the last dimension is robust and aligns with your original example.
@@ -741,29 +800,10 @@ def patch_Gemma3Attention_generic():
         return attn_output_projected, attn_weights # 3-tuple return
     pass
 
-    functions = []
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
-        past_key_value: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs: KWARGS_TYPE,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
-        return forward_function(self, hidden_states, position_embeddings, attention_mask, past_key_value, cache_position, **kwargs)
-    functions.append(forward)
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs: KWARGS_TYPE,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[tuple[torch.Tensor]]]:
-        return forward_function(self, hidden_states, position_embeddings, attention_mask, past_key_values, cache_position, **kwargs)
-    functions.append(forward)
-    patch_function_past_key_values(transformers.models.gemma3.modeling_gemma3.Gemma3Attention, "forward", functions)
+    has_cache_position = "cache_position" in inspect.signature(
+        transformers.models.gemma3.modeling_gemma3.Gemma3Attention.forward
+    ).parameters
+    functions = _make_gemma3_attn_forwards(forward_function, has_cache_position)
+    patch_function_past_key_values(transformers.models.gemma3.modeling_gemma3.Gemma3Attention, "forward", functions, match_level="relaxed")
 pass
 TEMPORARY_PATCHES.append(patch_Gemma3Attention_generic)

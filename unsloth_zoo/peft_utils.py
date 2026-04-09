@@ -40,6 +40,8 @@ SKIP_QUANTIZATION_MODULES = [
     "mlp.gate",                 # MoE Router
     "block_sparse_moe.gate",    # MoE Router
     'mamba',
+    "audio_tower",              # Gemma3N audio encoder conformer
+    "vision_tower",             # Gemma3 vision encoder (SigLIP)
 ]
 
 def get_peft_regex(
@@ -72,6 +74,16 @@ def get_peft_regex(
     # Get only linear layers
     modules = model.named_modules()
     linear_modules = [name for name, module in modules if isinstance(module, torch.nn.Linear)]
+
+    # Gemma4 ClippableLinear wraps nn.Linear as .linear child -- detect and add those
+    try:
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
+        for name, module in model.named_modules():
+            if isinstance(module, Gemma4ClippableLinear):
+                linear_modules.append(name + ".linear")
+    except ImportError:
+        pass
+
     all_linear_modules = Counter(x.rsplit(".")[-1] for x in linear_modules)
 
     # Isolate lm_head / projection matrices if count == 1
@@ -173,6 +185,9 @@ def requires_grad_for_gradient_checkpointing(model):
         pass
         # Keep none input requires grad hooks
         exec(f"module.{_hooks} = OrderedDict()")
+        if _hooks == "_forward_pre_hooks":
+            if hasattr(module, "_forward_pre_hooks_with_kwargs"):
+                module._forward_pre_hooks_with_kwargs.clear()
         for hook in other_hooks:
             exec(f"module.register{_hooks[:-1]}(hook)")
         pass
@@ -207,19 +222,34 @@ def requires_grad_for_gradient_checkpointing(model):
                 raise RuntimeError(f"Unsloth: Failed to make output require gradients: {e}")
     pass
 
-    def requires_grad_pre_hook(module, input):
-        type_input = type(input)
-        if type_input is torch.Tensor:
-            input.requires_grad_(True)
-        elif type_input is tuple or type_input is list:
-            if len(input) == 0:
-                raise RuntimeError("Unsloth: Failed to make input require gradients!")
-                # print(f"  WARNING: Empty list input to {module.__class__.__name__}!") # 
-                # return
-            if torch.is_floating_point(input[0]):
-                input[0].requires_grad_(True)
-        else:
-            raise RuntimeError("Unsloth: Failed to make input require gradients!")
+    def requires_grad_pre_hook(module, args, kwargs):
+        # Try positional args first (normal text models)
+        if args:
+            first = args[0]
+            if type(first) is torch.Tensor:
+                if torch.is_floating_point(first):
+                    first.requires_grad_(True)
+                return
+            pass
+        pass
+        # Kwargs-only path (VLMs like Idefics3, SmolVLM2, Llava, Qwen2VL, etc.)
+        # Look for the float tensor by name. inputs_embeds is universal across VLMs;
+        # hidden_states covers vision encoders; pixel_values covers image inputs.
+        for key in ("inputs_embeds", "hidden_states", "pixel_values"):
+            tensor = kwargs.get(key)
+            if tensor is not None and type(tensor) is torch.Tensor:
+                if torch.is_floating_point(tensor):
+                    tensor.requires_grad_(True)
+                return
+            pass
+        pass
+        # Fallback: scan kwargs for any float tensor
+        for key, val in kwargs.items():
+            if type(val) is torch.Tensor and torch.is_floating_point(val):
+                val.requires_grad_(True)
+                return
+            pass
+        pass
     pass
 
     # Find 1st ever item which requires grad
@@ -318,7 +348,7 @@ def requires_grad_for_gradient_checkpointing(model):
             module,
             "_forward_pre_hooks",
         )
-        module.register_forward_pre_hook(requires_grad_pre_hook)
+        module.register_forward_pre_hook(requires_grad_pre_hook, with_kwargs=True)
     pass
 pass
 

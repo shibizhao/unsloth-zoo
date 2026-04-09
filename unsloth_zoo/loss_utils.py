@@ -34,11 +34,6 @@ if importlib.util.find_spec("unsloth_studio") is None:
 else:
     UNSLOTH_STUDIO_ENABLED = os.environ.get("UNSLOTH_STUDIO_DISABLED", "0") == "0"
 pass
-if UNSLOTH_STUDIO_ENABLED:
-    from unsloth_studio.losses import (
-        unsloth_efficient_ce_loss,
-    )
-pass
 
 if DEVICE_TYPE == "cuda":
     major, minor = torch.cuda.get_device_capability()
@@ -223,46 +218,14 @@ def fused_linear_cross_entropy(
 pass
 
 
-def fast_linear_cross_entropy(
-    hidden_states        : torch.Tensor,
-    lm_head              : torch.nn.Linear,
-    labels               : torch.Tensor,
-    num_items_in_batch   : int = None,
-    ignore_index         : int = -100,
-    reduction            : str = "mean",
-    logit_softcapping    : float = 0,
-    logit_scale_multiply : float = 0,
-    logit_scale_divide   : float = 0,
-    attention_mask       : torch.Tensor = None,
-):
-    # All Unsloth Zoo code licensed under LGPLv3
-    if num_items_in_batch is not None and torch.is_tensor(num_items_in_batch):
-        num_items_in_batch = num_items_in_batch.to(hidden_states.device, non_blocking = True)
-
-    reduction = "sum" if num_items_in_batch is not None else "mean"
-    if logit_softcapping == 0: logit_softcapping = None
-    if logit_scale_multiply != 0:
-        logit_scale = logit_scale_multiply
-    elif logit_scale_divide != 0:
-        logit_scale = 1.0 / logit_scale_divide
-    else:
-        logit_scale = None
-
-    loss = unsloth_efficient_ce_loss(
-        hidden_states = hidden_states,
-        lm_head = lm_head,
-        labels = labels,
-        shift = True,
-        reduction = reduction,
-        logit_scale = logit_scale,
-        logit_softcapping = logit_softcapping,
-        ignore_index = ignore_index,
-        chunk_size = 512,
-        attention_mask = attention_mask,
+def fast_linear_cross_entropy(*args, **kwargs):
+    raise RuntimeError(
+        "Unsloth: `fast_linear_cross_entropy` has been deprecated. "
+        "Please update Unsloth and Unsloth Zoo via:\n"
+        "pip install --upgrade --no-cache-dir --no-deps unsloth_zoo unsloth"
     )
-    if num_items_in_batch is not None: loss = loss / num_items_in_batch
-    return loss
 pass
+
 
 global ALLOWED_NUM_ITEMS_IN_BATCH
 ALLOWED_NUM_ITEMS_IN_BATCH = dict()
@@ -321,9 +284,14 @@ def _unsloth_get_batch_samples(self, epoch_iterator, num_batches, device = None,
                         forward = __wrapped__
             pass
             name = forward.__qualname__
-            if "ForConditionalGeneration" in name or "VisionText2Text" in name:
+            # Also check the class name as a fallback - patched forward methods
+            # (e.g. from temporary_patches) may have qualnames that don't contain
+            # the original class identifiers like "CausalLM".
+            class_name = type(m).__name__
+            if "ForConditionalGeneration" in name or "ForConditionalGeneration" in class_name \
+                or "VisionText2Text" in name:
                 is_vlm = True
-            if is_vlm or "CausalLM" in name or "_fast_forward" in name:
+            if is_vlm or "CausalLM" in name or "CausalLM" in class_name or "_fast_forward" in name:
                 signature = inspect.signature(forward).parameters.values()
                 has_kwargs = tuple(signature)[-1].kind == inspect._VAR_KEYWORD
                 break
